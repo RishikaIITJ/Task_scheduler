@@ -33,8 +33,9 @@ struct CompareTask
 {
     bool operator()(const Task& t1, const Task& t2) 
     {
-        if(t1.startTime == t2.startTime)  return t1.duration > t2.duration;
-        return t1.startTime > t2.startTime;
+        if(t1.startTime != t2.startTime)  return t1.startTime > t2.startTime;
+        if (t1.priority != t2.priority)   return t1.priority > t2.priority;
+        return t1.duration > t2.duration;
     }
 };
 
