@@ -23,7 +23,7 @@ This project simulates two classic scheduling algorithms on real-world tasks and
 ### 1. — Compile the C++ backend
 
 ```bash
-g++ -o scheduler main.cpp 
+g++ -o scheduler task_schedule.cpp 
 ```
 
 ### 2. — Install Python dependencies
