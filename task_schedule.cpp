@@ -1,408 +1,530 @@
 #include <iostream>
 #include <vector>
-#include <queue>
-#include <ctime>
 #include <algorithm>
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <string>
+#include <numeric>
+#include <ctime>
 
 #ifdef _WIN32
     #include <windows.h>
-    void sleep_seconds(int seconds) { Sleep(seconds * 1000); }
+    void sleep_seconds(int s) { Sleep(s * 1000); }
+#else
+    #include <unistd.h>
+    void sleep_seconds(int s) { sleep(s); }
 #endif
 
 using namespace std;
 
-struct Task
-{
+
+const int AGING_THRESHOLD = 10;
+const int AGING_BOOST     = 1;
+
+//  Task struct
+struct Task {
     string name;
-    int priority; 
+    int    priority;          // 1=High, 2=Medium, 3=Low
+    int    effectivePriority;
     time_t startTime;
-    time_t endTime;   
-    int duration;
+    time_t endTime;
+    time_t deadline;          // 0 = no deadline
+    int    duration;
+    time_t addedAt;
 
-    Task(string n, int p, time_t start, time_t end) 
-        : name(n), priority(p), startTime(start), endTime(end)
+    int  waitingTime;
+    int  turnaroundTime;
+    bool deadlineMet;
+
+    Task(const string& n, int p, time_t start, time_t end, time_t dl = 0)
+        : name(n), priority(p), effectivePriority(p),
+          startTime(start), endTime(end), deadline(dl),
+          waitingTime(0), turnaroundTime(0), deadlineMet(true)
     {
-        duration = difftime(endTime, startTime);
+        duration = (int)difftime(end, start);
+        addedAt  = time(nullptr);
+    }
+
+    void applyAging(time_t currentTime) {
+        double waited     = difftime(currentTime, addedAt);
+        int    boosts     = (int)(waited / AGING_THRESHOLD);
+        effectivePriority = max(1, priority - boosts * AGING_BOOST);
     }
 };
 
-struct CompareTask
-{
-    bool operator()(const Task& t1, const Task& t2) 
-    {
-        if(t1.startTime != t2.startTime)  return t1.startTime > t2.startTime;
-        if (t1.priority != t2.priority)   return t1.priority > t2.priority;
-        return t1.duration > t2.duration;
-    }
+
+struct Metrics {
+    string algoName;
+    double avgWaitingTime;
+    double avgTurnaroundTime;
+    double throughput;
+    int    deadlinesMissed;
+    int    totalTasks;
+    vector<string> executionOrder;   
 };
 
-class TaskScheduler 
-{
+string formatTime(time_t t) {
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&t));
+    return string(buf);
+}
+
+string priorityLabel(int p) {
+    switch (p) {
+        case 1: return "High";
+        case 2: return "Medium";
+        case 3: return "Low";
+        default: return "?";
+    }
+}
+
+void printLine(char c = '-', int len = 65) {
+    cout << string(len, c) << "\n";
+}
+
+bool stringToTime(const string& s, time_t& result) {
+    if (s.length() != 19) return false;
+    struct tm tm = {};
+    istringstream ss(s);
+    ss >> get_time(&tm, "%Y-%m-%d %H:%M:%S");
+    if (ss.fail()) return false;
+    result = mktime(&tm);
+    return result != -1;
+}
+
+void clearCin() {
+    cin.clear();
+    cin.ignore(numeric_limits<streamsize>::max(), '\n');
+}
+
+//  FCFS 
+Metrics simulateFCFS(vector<Task> tasks) {
+    // Sort by arrival time
+    sort(tasks.begin(), tasks.end(), [](const Task& a, const Task& b){
+        return a.startTime < b.startTime;
+    });
+
+    time_t current      = tasks.empty() ? time(nullptr) : tasks[0].startTime;
+    int    deadlinesMissed = 0;
+    double avgWT = 0, avgTAT = 0;
+    vector<string> order;
+
+    for (auto& t : tasks) {
+        if (current < t.startTime) current = t.startTime;
+        time_t execEnd   = current + t.duration;
+        t.waitingTime    = (int)difftime(current, t.startTime);
+        t.turnaroundTime = (int)difftime(execEnd, t.startTime);
+        if (t.deadline > 0 && execEnd > t.deadline) deadlinesMissed++;
+        order.push_back(t.name);
+        current = execEnd;
+    }
+
+    int n = (int)tasks.size();
+    for (const auto& t : tasks) { avgWT += t.waitingTime; avgTAT += t.turnaroundTime; }
+    int makespan = (int)difftime(current, tasks[0].startTime);
+
+    return {"FCFS", avgWT/n, avgTAT/n,
+            makespan > 0 ? (double)n/makespan : 0,
+            deadlinesMissed, n, order};
+}
+
+
+//  Priority 
+Metrics simulatePriority(vector<Task> tasks) {
+    sort(tasks.begin(), tasks.end(), [](const Task& a, const Task& b){
+        if (a.priority != b.priority) return a.priority < b.priority;
+        return a.startTime < b.startTime;
+    });
+
+    time_t current      = tasks.empty() ? time(nullptr) : tasks[0].startTime;
+    int    deadlinesMissed = 0;
+    double avgWT = 0, avgTAT = 0;
+    vector<string> order;
+
+    for (auto& t : tasks) {
+        if (current < t.startTime) current = t.startTime;
+        time_t execEnd   = current + t.duration;
+        t.waitingTime    = (int)difftime(current, t.startTime);
+        t.turnaroundTime = (int)difftime(execEnd, t.startTime);
+        if (t.deadline > 0 && execEnd > t.deadline) deadlinesMissed++;
+        order.push_back(t.name);
+        current = execEnd;
+    }
+
+    int n = (int)tasks.size();
+    for (const auto& t : tasks) { avgWT += t.waitingTime; avgTAT += t.turnaroundTime; }
+    int makespan = (int)difftime(current, tasks[0].startTime);
+
+    return {"Priority", avgWT/n, avgTAT/n,
+            makespan > 0 ? (double)n/makespan : 0,
+            deadlinesMissed, n, order};
+}
+
+//  Comparison — FCFS vs Priority
+void runComparison(const vector<Task>& taskList) {
+    if (taskList.empty()) {
+        cout << "[!] No tasks to compare.\n";
+        return;
+    }
+
+    Metrics fcfs = simulateFCFS(taskList);
+    Metrics pri  = simulatePriority(taskList);
+
+    vector<Metrics> results = {fcfs, pri};
+
+    // Execution Order 
+    printLine('=');
+    cout << "  EXECUTION ORDER\n";
+    printLine('=');
+
+    // FCFS order
+    cout << "\n  FCFS (by arrival time):\n";
+    for (size_t i = 0; i < fcfs.executionOrder.size(); i++)
+        cout << "    #" << (i+1) << "  " << fcfs.executionOrder[i] << "\n";
+
+    // Priority order
+    cout << "\n  Priority Scheduling (High -> Medium -> Low):\n";
+    for (size_t i = 0; i < pri.executionOrder.size(); i++)
+        cout << "    #" << (i+1) << "  " << pri.executionOrder[i] << "\n";
+
+    // Comparison Table 
+    cout << "\n";
+    printLine('=');
+    cout << "  ALGORITHM COMPARISON\n";
+    printLine('=');
+
+    cout << "\n" << left
+         << setw(22) << "Algorithm"
+         << setw(18) << "Avg Wait (s)"
+         << setw(22) << "Avg Turnaround (s)"
+         << setw(16) << "Throughput"
+         << "Deadlines Missed\n";
+    printLine();
+
+    for (const auto& m : results) {
+        cout << setw(22) << m.algoName
+             << setw(18) << fixed << setprecision(2) << m.avgWaitingTime
+             << setw(22) << m.avgTurnaroundTime
+             << setw(16) << setprecision(4)          << m.throughput
+             << m.deadlinesMissed << "/" << m.totalTasks << "\n";
+    }
+
+    //  Best Algorithm 
+    auto best = min_element(results.begin(), results.end(),
+        [](const Metrics& a, const Metrics& b){
+            return a.avgWaitingTime < b.avgWaitingTime;
+        });
+
+    printLine();
+    cout << "\n  Best Algorithm for this task set: " << best->algoName << "\n";
+    cout << "    Avg Waiting Time : " << fixed << setprecision(2) << best->avgWaitingTime << "s\n";
+    cout << "    Avg Turnaround   : " << best->avgTurnaroundTime << "s\n";
+    cout << "    Deadlines Missed : " << best->deadlinesMissed << "/" << best->totalTasks << "\n";
+
+    // Analysis 
+    cout << "\n  Analysis:\n";
+
+    double improve = ((fcfs.avgWaitingTime - pri.avgWaitingTime)
+                      / max(fcfs.avgWaitingTime, 1.0)) * 100;
+
+    if (pri.avgWaitingTime < fcfs.avgWaitingTime)
+        cout << "  - Priority Scheduling reduced avg wait by "
+             << fixed << setprecision(1) << improve << "% vs FCFS\n"
+             << "    by running High priority tasks before lower ones.\n";
+    else if (fcfs.avgWaitingTime < pri.avgWaitingTime)
+        cout << "  - FCFS performed better because tasks arrived in a\n"
+             << "    natural order — no reordering benefit was gained.\n";
+    else
+        cout << "  - Both algorithms performed equally for this task set.\n";
+
+    if (best->deadlinesMissed == 0)
+        cout << "  - All deadlines met under " << best->algoName << ".\n";
+    else
+        cout << "  - " << best->deadlinesMissed
+             << " deadline(s) missed even under the best algorithm.\n";
+
+    printLine('=');
+}
+
+
+//  TaskScheduler class
+class TaskScheduler {
 private:
     vector<Task> taskList;
 
+    bool hasConflict(const Task& a, const Task& b) {
+        return !(difftime(a.endTime, b.startTime) <= 0 ||
+                 difftime(b.endTime, a.startTime) <= 0);
+    }
+
 public:
-    void addTask(const string& name, int priority, time_t start, time_t end) 
+
+    // Add Tasks
+    void addTask(const string& name, int priority,
+                 time_t start, time_t end, time_t deadline = 0)
     {
-        taskList.push_back(Task(name, priority, start, end));
-
-        cout<<"Task added: "<<name <<" | Priority: "<<priorityLabel(priority) <<'\n';
-
-        char* startStr = ctime(&start); 
-        cout<<"Start Time: "<<startStr;
-
-        char* endStr = ctime(&end);
-        cout<<"End Time: "<< endStr;
-
-        cout<<"Task duration: "<< difftime(end, start)<<" seconds\n";
-        cout<<"Task added successfully.\n";
-    }
-
-    void deleteTask(const string& name)
-     {
-        auto taskToRemove = remove_if(taskList.begin(), taskList.end(),[&](const Task& t){return t.name == name;});
-
-        if(taskToRemove != taskList.end()) 
-        {
-            taskList.erase(taskToRemove, taskList.end());
-            cout<<"Task " <<name<<" deleted successfully.\n";
-        } 
-        else
-        {
-            cout<<"Task "<<name<<" not found.\n";
-        }
-    }
-
-    void updateTask(const string& name, int newPriority, time_t newStart, time_t newEnd) {
-        bool found = false;
-        for(auto& task : taskList) 
-        {
-            if(task.name==name)
-             {
-                task.priority = newPriority;
-                task.startTime = newStart;
-                task.endTime = newEnd;
-                task.duration = difftime(newEnd, newStart);
-                found = true;
-                cout <<"Task "<<name<<" updated.\n";
-                cout <<"New Priority: "<<priorityLabel(newPriority)<<'\n';
-                cout <<"New Start Time: "<< ctime(&newStart);
-                cout <<"New End Time: "<< ctime(&newEnd);
-                cout <<"New Duration: "<<task.duration<<" seconds\n";
-                break;
+        for (const auto& t : taskList) {
+            if (t.name == name) {
+                cout << "[!] Task '" << name << "' already exists.\n";
+                return;
             }
         }
-        if(!found)
-         {
-            cout<<"Task "<<name<<" not found.\n";
+        Task nt(name, priority, start, end, deadline);
+        for (const auto& t : taskList)
+            if (hasConflict(nt, t))
+                cout << "[!] Warning: '" << name
+                     << "' overlaps with '" << t.name << "'.\n";
+
+        taskList.push_back(nt);
+    
+        cout << "[+] Added: " << name
+             << " | " << priorityLabel(priority)
+             << " | " << (int)difftime(end, start) << "s\n";
+    }
+
+    // Delete Tasks
+    void deleteTask(const string& name) {
+        auto it = remove_if(taskList.begin(), taskList.end(),
+                            [&](const Task& t){ return t.name == name; });
+        if (it != taskList.end()) {
+            taskList.erase(it, taskList.end());
+            cout << "[-] Deleted: " << name << "\n";
+        } else {
+            cout << "[!] Not found: " << name << "\n";
         }
     }
 
-    void listTasks() const
-     {
-        if(taskList.empty()) 
-        {
-            cout <<"No tasks scheduled.\n";
-            return;
-        }
-        cout <<"\nScheduled Tasks:\n";
-        cout <<"---------------------------------\n";
-        for(const auto& task : taskList)
-         {
-            cout << task.name<<" | Priority: " << priorityLabel(task.priority)<<'\n';
-            cout <<"Start Time: " <<ctime(&task.startTime);
-            cout <<"End Time: " <<ctime(&task.endTime);
-            cout <<"Duration: " <<task.duration<<" seconds\n";
-            cout <<"---------------------------------\n";
-
-        }
-    }
-
-    void runScheduler()
-     {
-        if(taskList.empty())
-         {
-            cout << "No  scheduled tasks to run.\n";
-            return;
-        }
-        
-        cout <<"\nStarting Task Execution:\n\n";
-
-        priority_queue<Task, vector<Task>, CompareTask> taskQueue(taskList.begin(), taskList.end());
-
-        while(!taskQueue.empty()) 
-        {
-            Task current = taskQueue.top();
-            taskQueue.pop();
-
-            time_t now = time(0);
-            if(now < current.startTime) 
-            {
-                cout <<"Waiting for task: "<<current.name<< " to start...\n";
-                sleep_seconds(difftime(current.startTime, now));
-            }
-
-            cout <<"Running: " << current.name << " | Priority: " << priorityLabel(current.priority)<< " | Started at: " << ctime(&current.startTime);
-
-            sleep_seconds(current.duration);
-
-            time_t endTime = time(0);
-            cout << "Completed: " <<current.name<< " | Finished at: " << ctime(&endTime) << endl;
-        }
-        cout << "All tasks completed.\n";
-    }
-
-const vector<Task>& getTaskList() const 
-{
-        return taskList;
-}
-
-private:
-    string priorityLabel(int p) const 
+    // Update Tasks
+    void updateTask(const string& name, int newPri,
+                    time_t newStart, time_t newEnd, time_t newDl)
     {
-        switch(p)
-        {
-            case 1: return "High";
-            case 2: return "Medium";
-            case 3: return "Low";
+        for (auto& t : taskList) {
+            if (t.name == name) {
+                t.priority         = newPri;
+                t.effectivePriority = newPri;
+                t.startTime        = newStart;
+                t.endTime          = newEnd;
+                t.duration         = (int)difftime(newEnd, newStart);
+                t.deadline         = newDl;
+                t.addedAt          = time(nullptr);
+                cout << "[~] Updated: " << name << "\n";
+                return;
+            }
         }
+        cout << "[!] Not found: " << name << "\n";
     }
+
+    // List Tasks
+    void listTasks() const {
+        if (taskList.empty()) { cout << "[i] No tasks.\n"; return; }
+
+        vector<Task> sorted = taskList;
+        sort(sorted.begin(), sorted.end(), [](const Task& a, const Task& b){
+            if (a.priority != b.priority) return a.priority < b.priority;
+            return a.startTime < b.startTime;
+        });
+
+        printLine('=');
+        cout << "  Tasks (" << sorted.size() << ")\n";
+        printLine('=');
+        for (size_t i = 0; i < sorted.size(); i++) {
+            const Task& t = sorted[i];
+            cout << "  [" << i+1 << "] " << t.name
+                 << " | " << priorityLabel(t.priority)
+                 << " | " << formatTime(t.startTime)
+                 << " -> " << formatTime(t.endTime)
+                 << " (" << t.duration << "s)";
+            if (t.deadline > 0)
+                cout << " | Deadline: " << formatTime(t.deadline);
+            cout << "\n";
+        }
+        printLine('=');
+    }
+
+   
+    void runScheduler() {
+        if (taskList.empty()) { cout << "[i] No tasks.\n"; return; }
+
+        time_t     now = time(nullptr);
+        vector<Task> tasks = taskList;
+        for (auto& t : tasks) t.applyAging(now);
+
+        // Sort by effective priority then start time
+        sort(tasks.begin(), tasks.end(), [](const Task& a, const Task& b){
+            if (a.effectivePriority != b.effectivePriority)
+                return a.effectivePriority < b.effectivePriority;
+            return a.startTime < b.startTime;
+        });
+
+        printLine('=');
+        cout << "  Running: Priority Scheduling (real-time)\n";
+        printLine('=');
+
+        int deadlinesMissed = 0;
+
+        for (auto& t : tasks) {
+            now = time(nullptr);
+            if (now < t.startTime) {
+                cout << "[*] Waiting " << (int)difftime(t.startTime, now)
+                     << "s for '" << t.name << "'...\n";
+                sleep_seconds((int)difftime(t.startTime, now));
+            }
+            time_t execStart = time(nullptr);
+            cout << "\n[>] Running: " << t.name
+                 << " | " << priorityLabel(t.effectivePriority)
+                 << " | Start: " << formatTime(execStart) << "\n";
+            sleep_seconds(t.duration);
+            time_t execEnd = time(nullptr);
+
+            if (t.deadline > 0 && execEnd > t.deadline) {
+                deadlinesMissed++;
+                cout << "[x] DEADLINE MISSED: " << t.name
+                     << " (was " << formatTime(t.deadline) << ")\n";
+            } else {
+                cout << "[ok] Done: " << t.name
+                     << " at " << formatTime(execEnd) << "\n";
+            }
+        }
+
+        printLine('=');
+        cout << "  Deadlines missed: " << deadlinesMissed
+             << "/" << taskList.size() << "\n";
+        printLine('=');
+    }
+
+    // Compare FCFS vs Priority
+    void compare() {
+        runComparison(taskList);
+    }
+
+    const vector<Task>& getTaskList() const { return taskList; }
 };
 
-bool stringToTime(const string& timeStr, time_t& resultTime) 
-{
-    struct tm tm = {};
-    istringstream ss(timeStr);
-    ss>> get_time(&tm, "%Y-%m-%d %H:%M:%S");
 
-    if(ss.fail()) return false;
-    
-    resultTime = mktime(&tm);
-    return true;
-}
-
-void clearCin()
-{
-    cin.clear();
-    cin.ignore(numeric_limits<streamsize>::max(),'\n');
-}
-
-int main() 
-{
-    TaskScheduler scheduler;
-    string command;
-
-    while(true) 
-    {
-        cout<<"Enter command(add, delete, update, list, run, exit): ";
-        cin>>command;
+//  Helpers
+int readPriority() {
+    int p;
+    cout << "    Priority (1=High, 2=Medium, 3=Low): ";
+    while (!(cin >> p) || p < 1 || p > 3) {
         clearCin();
+        cout << "    Enter 1, 2, or 3: ";
+    }
+    clearCin();
+    return p;
+}
 
-        if(command=="add") 
-        {
-            int count;
-            cout<<"How many tasks do you want to add? ";
-            cin>>count;
+bool readTimeRange(time_t& start, time_t& end) {
+    string s, e;
+    while (true) {
+        cout << "    Start (YYYY-MM-DD HH:MM:SS): "; getline(cin, s);
+        cout << "    End   (YYYY-MM-DD HH:MM:SS): "; getline(cin, e);
+        if (!stringToTime(s, start)) { cout << "    [!] Bad start format.\n"; continue; }
+        if (!stringToTime(e, end))   { cout << "    [!] Bad end format.\n";   continue; }
+        if (difftime(end, start) <= 0) {
+            cout << "    [!] End must be after start.\n"; continue;
+        }
+        return true;
+    }
+}
+
+
+int main() {
+    TaskScheduler scheduler;
+    string        cmd;
+
+    printLine('=');
+    cout << "  Task Scheduler — FCFS vs Priority Comparison\n";
+    cout << "  4th Semester B.Tech DSA Project\n";
+    printLine('=');
+    cout << "  Commands: add | delete | update | list | run | compare | exit\n";
+    printLine('=');
+    cout << "\n";
+
+    while (true) {
+        cout << "scheduler> ";
+        getline(cin, cmd);
+
+       
+        cmd.erase(0, cmd.find_first_not_of(" \t"));
+        if (!cmd.empty())
+            cmd.erase(cmd.find_last_not_of(" \t") + 1);
+
+       
+        if (cmd == "add") {
+            int count = 0;
+            cout << "How many tasks? ";
+            while (!(cin >> count) || count <= 0) {
+                clearCin();
+                cout << "Enter valid number: ";
+            }
             clearCin();
 
-            while(count <= 0) 
-            {
-                cout <<"Invalid type of input of number of tasks. Please enter valid number of tasks: ";
-                cin >> count;
-                clearCin();
-            }
-            
-            cout<<"Enter tasks details:\n";
-            for(int i=0; i<count; i++)
-            {
-                string taskName;
-                int priority;
-                string startTime, endTime;
-
-                cout<<"\nTask "<<(i + 1)<<" :\n";
-                cout<<"Enter task name: ";
-                getline(cin,taskName);
-                
-                cout<<"Enter priority (1-High, 2-Medium, 3-Low): ";
-                cin>>priority;
-                clearCin();
-                while(priority<1 || priority>3) 
-                {
-                    cout<<"Invalid priority. Please enter priority again (1-High, 2-Medium, 3-Low): ";
-                    cin>>priority;
-                    clearCin();
-                }
-
+            for (int i = 0; i < count; i++) {
+                cout << "\n  Task " << (i+1) << ":\n";
+                string name;
+                cout << "    Name: "; getline(cin, name);
+                int    p = readPriority();
                 time_t start, end;
-                while (true)
-                {
-                    cout <<"Enter start time (YYYY-MM-DD HH:MM:SS): ";
-                    getline(cin, startTime);
+                readTimeRange(start, end);
 
-                    cout <<"Enter end time (YYYY-MM-DD HH:MM:SS): ";
-                    getline(cin, endTime);
-
-                    bool validFormat = true;
-
-                    if(startTime.length()!= 19 || startTime[4]!= '-' || startTime[7]!= '-' || startTime[10]!= ' ' || startTime[13]!= ':' || startTime[16]!= ':')  validFormat = false;
-
-                    if(endTime.length()!= 19 || endTime[4]!= '-' || endTime[7]!= '-' || endTime[10]!= ' ' || endTime[13]!= ':' || endTime[16]!= ':')  validFormat = false;
-
-                    if(!validFormat)
-                    {
-                        cout <<"Invalid format. Please enter both times in YYYY-MM-DD HH:MM:SS format.\n";
-                        continue;
+                string dlChoice;
+                cout << "    Set a deadline? (y/n): "; getline(cin, dlChoice);
+                time_t deadline = 0;
+                if (dlChoice == "y" || dlChoice == "Y") {
+                    string dlStr;
+                    while (true) {
+                        cout << "    Deadline (YYYY-MM-DD HH:MM:SS): ";
+                        getline(cin, dlStr);
+                        if (stringToTime(dlStr, deadline) &&
+                            difftime(deadline, end) > 0) break;
+                        cout << "    [!] Deadline must be after end time.\n";
                     }
-
-                    if(!stringToTime(startTime, start)) 
-                    {
-                        cout <<"Could not parse start time. Please try again.\n";
-                        continue;
-                    }
-                
-                    if(!stringToTime(endTime, end)) 
-                    {
-                        cout <<"Could not parse end time. Please try again.\n";
-                        continue;
-                    }
-
-                    if(difftime(end, start) <= 0) 
-                    {
-                        cout <<"End time must be after start time. Please re-enter both times.\n";
-                        continue;
-                    }
-
-                    break;
                 }
-
-                scheduler.addTask(taskName, priority, start, end);
+                scheduler.addTask(name, p, start, end, deadline);
             }
-
         }
-        else if(command == "delete") 
-        {
+
+        else if (cmd == "delete") {
             string name;
-            cout <<"Enter task name to delete: ";
-            getline(cin, name);
-
+            cout << "Task name: "; getline(cin, name);
             scheduler.deleteTask(name);
-
-        } 
-        else if(command == "update")
-        {
-            string name;        
-            cout <<"Enter task name to update: ";
-            getline(cin, name);
-
-            int newPriority= -1;
-            time_t newStart= -1, newEnd= -1;
-        
-            string choice;
-            cout <<"Do you want to update priority? (y/n): ";
-            getline(cin, choice);
-
-            if(choice=="y" || choice=="Y")
-            {
-                cout <<"Enter new priority (1-High, 2-Medium, 3-Low): ";
-                cin >> newPriority;
-                clearCin();
-                while(newPriority < 1 || newPriority > 3) 
-                {
-                    cout << "Invalid priority. Please enter again (1-High, 2-Medium, 3-Low): ";
-                    cin >> newPriority;
-                    clearCin();
-                }
-            }
-
-            cout <<"Do you want to update start time? (y/n): ";
-            getline(cin, choice);
-
-            if(choice=="y" || choice=="Y") 
-            {
-                string newStartTime;
-                while (true) 
-                {
-                    cout <<"Enter new start time (YYYY-MM-DD HH:MM:SS): ";
-                    getline(cin, newStartTime);
-
-                    if(newStartTime.length()!= 19 || newStartTime[4]!= '-' || newStartTime[7]!= '-' || newStartTime[10]!= ' ' || newStartTime[13]!= ':' || newStartTime[16]!= ':') 
-                    {
-                        cout << "Invalid format. Please try again.\n";
-                        continue;
-                    }
-                    if(!stringToTime(newStartTime, newStart)) 
-                    {
-                        cout << "Could not parse start time.\n";
-                        continue;
-                    }
-                    break;
-                }
-            }
-        
-            cout << "Do you want to update end time? (y/n): ";
-            getline(cin, choice);
-            if(choice =="y" || choice =="Y")
-            {
-                string newEndTime;
-                while (true)
-                {
-                    cout <<"Enter new end time (YYYY-MM-DD HH:MM:SS): ";
-                    getline(cin, newEndTime);
-
-                    if(newEndTime.length()!= 19 || newEndTime[4]!= '-' || newEndTime[7]!= '-' || newEndTime[10]!= ' ' || newEndTime[13]!= ':' || newEndTime[16]!= ':') 
-                    {
-                        cout <<"Invalid format. Please try again.\n";
-                        continue;
-                    }
-                    if(!stringToTime(newEndTime, newEnd))
-                    {
-                        cout << "Could not parse end time.\n";
-                        continue;
-                    }
-                    break;
-                }
-            }
-        
-            if(newStart!= -1 && newEnd!= -1 && difftime(newEnd, newStart)<= 0)
-            {
-                cout <<"Error: End time must be after start time. Update aborted.\n";
-            } 
-            else
-            {
-                for(const auto& task:scheduler.getTaskList()) {
-                    if(task.name==name)
-                     {
-                        if(newPriority == -1) newPriority =task.priority;
-                        if(newStart == -1) newStart = task.startTime;
-                        if(newEnd == -1) newEnd = task.endTime;
-                        break;
-                    }
-                }
-                scheduler.updateTask(name, newPriority, newStart, newEnd);
-            }
         }
 
-        else if(command =="list") 
-        {
-            scheduler.listTasks();
-        } 
+        else if (cmd == "update") {
+            string name;
+            cout << "Task name: "; getline(cin, name);
+            const auto& tasks = scheduler.getTaskList();
+            auto it = find_if(tasks.begin(), tasks.end(),
+                              [&](const Task& t){ return t.name == name; });
+            if (it == tasks.end()) { cout << "[!] Not found.\n"; continue; }
 
-        else if(command == "run")
-        {
-            scheduler.runScheduler();
+            int    p  = it->priority;
+            time_t s  = it->startTime, e = it->endTime, dl = it->deadline;
+            string ch;
+
+            cout << "Update priority? (y/n): "; getline(cin, ch);
+            if (ch == "y" || ch == "Y") p = readPriority();
+
+            cout << "Update time? (y/n): "; getline(cin, ch);
+            if (ch == "y" || ch == "Y") readTimeRange(s, e);
+
+            cout << "Update deadline? (y/n): "; getline(cin, ch);
+            if (ch == "y" || ch == "Y") {
+                string dlStr;
+                cout << "    Deadline (YYYY-MM-DD HH:MM:SS): ";
+                getline(cin, dlStr);
+                stringToTime(dlStr, dl);
+            }
+            scheduler.updateTask(name, p, s, e, dl);
         }
 
-        else if(command == "exit") 
-        {
-            break;
-
-        } 
-        else 
-        {
-            cout <<"Unknown command. Please try again.\n";
+        else if (cmd == "list")    { scheduler.listTasks();   }
+        else if (cmd == "run")     { scheduler.runScheduler(); }
+        else if (cmd == "compare") { scheduler.compare();     }
+        else if (cmd == "exit")    { cout << "Goodbye!\n"; break; }
+        else if (!cmd.empty()) {
+            cout << "[!] Commands: add | delete | update | list | run | compare | exit\n";
         }
     }
 
